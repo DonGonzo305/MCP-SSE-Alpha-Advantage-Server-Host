@@ -13,11 +13,12 @@ app.use(
   })
 );
 
-// Optional simple auth: set API_KEY to require it.
-// If API_KEY is empty, auth is OFF.
+// =======================
+// Auth (protect your MCP server)
+// =======================
 const API_KEY = process.env.API_KEY || "";
 function requireAuth(req, res) {
-  if (!API_KEY) return true;
+  if (!API_KEY) return true; // auth disabled
   const hdr = req.header("x-api-key") || "";
   const bearer = req.header("authorization") || "";
   const ok = hdr === API_KEY || bearer === `Bearer ${API_KEY}`;
@@ -31,8 +32,11 @@ function requireAuth(req, res) {
 // sessionId -> { res, createdAt }
 const sessions = new Map();
 
-// Tool catalog based on Alpha Vantage MCP "Tools Reference" (Jan 2026 wrapper model)
-const TOOL_CATALOG = {
+// =======================
+// Alpha Vantage "function catalog"
+// (grouped like the Alpha Vantage MCP tools page)
+// =======================
+const AV_FUNCTION_CATALOG = {
   core_stock_apis: [
     "TIME_SERIES_INTRADAY",
     "TIME_SERIES_DAILY",
@@ -101,23 +105,84 @@ const TOOL_CATALOG = {
     "NONFARM_PAYROLL",
   ],
   technical_indicators: [
-    "SMA","EMA","WMA","DEMA","TEMA","TRIMA","KAMA","MAMA","VWAP","T3",
-    "MACD","MACDEXT","STOCH","STOCHF","RSI","STOCHRSI","WILLR","ADX","ADXR",
-    "APO","PPO","MOM","BOP","CCI","CMO","ROC","ROCR","AROON","AROONOSC","MFI",
-    "TRIX","ULTOSC","DX","MINUS_DI","PLUS_DI","MINUS_DM","PLUS_DM","BBANDS",
-    "MIDPOINT","MIDPRICE","SAR","TRANGE","ATR","NATR","AD","ADOSC","OBV",
-    "HT_TRENDLINE","HT_SINE","HT_TRENDMODE","HT_DCPERIOD","HT_DCPHASE","HT_PHASOR",
+    "SMA",
+    "EMA",
+    "WMA",
+    "DEMA",
+    "TEMA",
+    "TRIMA",
+    "KAMA",
+    "MAMA",
+    "VWAP",
+    "T3",
+    "MACD",
+    "MACDEXT",
+    "STOCH",
+    "STOCHF",
+    "RSI",
+    "STOCHRSI",
+    "WILLR",
+    "ADX",
+    "ADXR",
+    "APO",
+    "PPO",
+    "MOM",
+    "BOP",
+    "CCI",
+    "CMO",
+    "ROC",
+    "ROCR",
+    "AROON",
+    "AROONOSC",
+    "MFI",
+    "TRIX",
+    "ULTOSC",
+    "DX",
+    "MINUS_DI",
+    "PLUS_DI",
+    "MINUS_DM",
+    "PLUS_DM",
+    "BBANDS",
+    "MIDPOINT",
+    "MIDPRICE",
+    "SAR",
+    "TRANGE",
+    "ATR",
+    "NATR",
+    "AD",
+    "ADOSC",
+    "OBV",
+    "HT_TRENDLINE",
+    "HT_SINE",
+    "HT_TRENDMODE",
+    "HT_DCPERIOD",
+    "HT_DCPHASE",
+    "HT_PHASOR",
   ],
   ping: ["PING", "ADD_TWO_NUMBERS"],
 };
 
-const ALL_FUNCTIONS = Object.values(TOOL_CATALOG).flat();
+const ALL_AV_FUNCTIONS = Object.values(AV_FUNCTION_CATALOG).flat();
 
-function isKnownFunction(name) {
-  return ALL_FUNCTIONS.includes(String(name || "").toUpperCase());
+function normalizeFnName(name) {
+  return String(name || "").trim().toUpperCase();
 }
 
+function isKnownAvFunction(name) {
+  return ALL_AV_FUNCTIONS.includes(normalizeFnName(name));
+}
 
+function getAvCategory(fnName) {
+  const fn = normalizeFnName(fnName);
+  for (const [category, fns] of Object.entries(AV_FUNCTION_CATALOG)) {
+    if (fns.includes(fn)) return category;
+  }
+  return "unknown";
+}
+
+// =======================
+// SSE helpers
+// =======================
 function sseSend(res, eventName, dataObj) {
   res.write(`event: ${eventName}\n`);
   res.write(`data: ${JSON.stringify(dataObj)}\n\n`);
@@ -130,6 +195,10 @@ function sendJsonRpc(sessionId, payload) {
   return true;
 }
 
+// =======================
+// Routes
+// =======================
+
 // 1) SSE "listening line"
 app.get("/sse", (req, res) => {
   if (!requireAuth(req, res)) return;
@@ -139,7 +208,6 @@ app.get("/sse", (req, res) => {
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no"); // helps behind some proxies
-
   res.flushHeaders?.();
 
   const sessionId = crypto.randomUUID();
@@ -162,9 +230,6 @@ app.get("/sse", (req, res) => {
 
 // 2) Message inbox
 app.post("/messages", (req, res) => {
-  console.log("Sessions currently:", [...sessions.keys()]);
-  console.log("Incoming sessionId:", req.query.sessionId);
-
   if (!requireAuth(req, res)) return;
 
   const sessionId = String(req.query.sessionId || "");
@@ -173,7 +238,6 @@ app.post("/messages", (req, res) => {
   }
 
   const msg = req.body;
-
   if (!msg || msg.jsonrpc !== "2.0" || typeof msg.method !== "string") {
     return res.status(400).json({ error: "Invalid JSON-RPC" });
   }
@@ -186,16 +250,25 @@ app.post("/messages", (req, res) => {
       sendJsonRpc(sessionId, {
         jsonrpc: "2.0",
         id: msg.id,
-        error: { code: -32603, message: "Internal error", data: String(err?.message || err) },
+        error: {
+          code: -32603,
+          message: "Internal error",
+          data: String(err?.message || err),
+        },
       });
     }
   });
 });
 
-// MCP-ish methods (minimal)
+app.get("/health", (req, res) => res.status(200).send("ok"));
+
+// =======================
+// JSON-RPC / MCP-ish handlers
+// =======================
 async function handleJsonRpc(sessionId, msg) {
   const { id, method, params } = msg;
 
+  // 1) Initialize
   if (method === "initialize") {
     if (id !== undefined) {
       sendJsonRpc(sessionId, {
@@ -203,7 +276,7 @@ async function handleJsonRpc(sessionId, msg) {
         id,
         result: {
           protocolVersion: "2024-11-05",
-          serverInfo: { name: "legacy-sse-mcp", version: "1.0.0" },
+          serverInfo: { name: "legacy-sse-alpha-vantage-proxy", version: "1.0.0" },
           capabilities: { tools: {} },
         },
       });
@@ -211,165 +284,203 @@ async function handleJsonRpc(sessionId, msg) {
     return;
   }
 
- if (method === "tools/list") {
-  if (id !== undefined) {
-    sendJsonRpc(sessionId, {
-      jsonrpc: "2.0",
-      id,
-      result: {
-        tools: [
-          {
-            name: "TOOL_LIST",
-            description: "List available Alpha Vantage functions grouped by category.",
-            inputSchema: { type: "object", properties: {}, additionalProperties: false },
-          },
-          {
-            name: "TOOL_GET",
-            description: "Get info about a specific Alpha Vantage function (name, category, and basic usage).",
-            inputSchema: {
-              type: "object",
-              properties: { tool_name: { type: "string" } },
-              required: ["tool_name"],
-              additionalProperties: false,
+  // 2) List tools (these are the MCP tools your server offers)
+  if (method === "tools/list") {
+    if (id !== undefined) {
+      sendJsonRpc(sessionId, {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          tools: [
+            {
+              name: "av_list_functions",
+              description: "List Alpha Vantage function names grouped by category.",
+              inputSchema: { type: "object", properties: {}, additionalProperties: false },
             },
-          },
-          {
-            name: "TOOL_CALL",
-            description: "Call an Alpha Vantage function by name with arguments (passed through to the API).",
-            inputSchema: {
-              type: "object",
-              properties: {
-                tool_name: { type: "string" },
-                arguments: { type: "object" },
+            {
+              name: "av_describe_function",
+              description:
+                "Describe an Alpha Vantage function (category + how to call it).",
+              inputSchema: {
+                type: "object",
+                properties: { function: { type: "string" } },
+                required: ["function"],
+                additionalProperties: false,
               },
-              required: ["tool_name"],
-              additionalProperties: false,
             },
-          },
-        ],
-      },
-    });
+            {
+              name: "av_call_function",
+              description:
+                "Call an Alpha Vantage function and return the JSON response. Provide function name + query params.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  function: { type: "string", description: "Alpha Vantage function, e.g. GLOBAL_QUOTE" },
+                  params: { type: "object", description: "Query parameters (symbol, interval, outputsize, etc.)" },
+                },
+                required: ["function"],
+                additionalProperties: false,
+              },
+            },
+            // Keep echo as a simple connectivity test
+            {
+              name: "echo",
+              description: "Echo back the provided text (connectivity test).",
+              inputSchema: {
+                type: "object",
+                properties: { text: { type: "string" } },
+                required: ["text"],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      });
+    }
+    return;
   }
-  return;
-}
 
-
+  // 3) Call tool
   if (method === "tools/call") {
-  const toolName = String(params?.name || "");
-  const args = params?.arguments || {};
+    const toolName = String(params?.name || "");
+    const args = params?.arguments || {};
 
-  // Wrapper: TOOL_LIST
-  if (toolName === "TOOL_LIST") {
-    sendJsonRpc(sessionId, {
-      jsonrpc: "2.0",
-      id,
-      result: { content: [{ type: "text", text: JSON.stringify(TOOL_CATALOG, null, 2) }] },
-    });
-    return;
-  }
-
-  // Wrapper: TOOL_GET
-  if (toolName === "TOOL_GET") {
-    const fn = String(args.tool_name || "").toUpperCase();
-    if (!isKnownFunction(fn)) {
-      sendJsonRpc(sessionId, {
-        jsonrpc: "2.0",
-        id,
-        error: { code: -32602, message: `Unknown tool_name: ${fn}` },
-      });
+    // --- echo (connectivity test)
+    if (toolName === "echo") {
+      const text = String(args.text ?? "");
+      if (id !== undefined) {
+        sendJsonRpc(sessionId, {
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text }] },
+        });
+      }
       return;
     }
 
-    // Find category
-    const category = Object.entries(TOOL_CATALOG).find(([, list]) => list.includes(fn))?.[0] || "unknown";
-
-    sendJsonRpc(sessionId, {
-      jsonrpc: "2.0",
-      id,
-      result: {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                tool_name: fn,
-                category,
-                note:
-                  "Use TOOL_CALL with tool_name set to this function name, and arguments containing the Alpha Vantage query params (e.g., symbol, interval, outputsize, etc.).",
-              },
-              null,
-              2
-            ),
+    // --- av_list_functions
+    if (toolName === "av_list_functions") {
+      if (id !== undefined) {
+        sendJsonRpc(sessionId, {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [{ type: "text", text: JSON.stringify(AV_FUNCTION_CATALOG, null, 2) }],
           },
-        ],
-      },
-    });
-    return;
-  }
-
-  // Wrapper: TOOL_CALL
-  if (toolName === "TOOL_CALL") {
-    const avKey = process.env.ALPHAVANTAGE_API_KEY || "";
-    if (!avKey) {
-      sendJsonRpc(sessionId, {
-        jsonrpc: "2.0",
-        id,
-        error: { code: -32000, message: "Missing ALPHAVANTAGE_API_KEY on server" },
-      });
+        });
+      }
       return;
     }
 
-    const fn = String(args.tool_name || "").toUpperCase();
-    if (!isKnownFunction(fn)) {
-      sendJsonRpc(sessionId, {
-        jsonrpc: "2.0",
-        id,
-        error: { code: -32602, message: `Unknown tool_name: ${fn}` },
-      });
+    // --- av_describe_function
+    if (toolName === "av_describe_function") {
+      const fn = normalizeFnName(args.function);
+      if (!isKnownAvFunction(fn)) {
+        if (id !== undefined) {
+          sendJsonRpc(sessionId, {
+            jsonrpc: "2.0",
+            id,
+            error: { code: -32602, message: `Unknown Alpha Vantage function: ${fn}` },
+          });
+        }
+        return;
+      }
+
+      const category = getAvCategory(fn);
+      if (id !== undefined) {
+        sendJsonRpc(sessionId, {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    function: fn,
+                    category,
+                    usage: {
+                      tool: "av_call_function",
+                      example: {
+                        function: fn,
+                        params: { symbol: "AAPL" },
+                      },
+                      note:
+                        "Put Alpha Vantage query parameters inside params (symbol, interval, outputsize, market, etc.).",
+                    },
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          },
+        });
+      }
       return;
     }
 
-    const q = args.arguments || {};
-    if (typeof q !== "object" || q === null || Array.isArray(q)) {
-      sendJsonRpc(sessionId, {
-        jsonrpc: "2.0",
-        id,
-        error: { code: -32602, message: "arguments must be an object" },
-      });
+    // --- av_call_function
+    if (toolName === "av_call_function") {
+      const avKey = process.env.ALPHAVANTAGE_API_KEY || "";
+      if (!avKey) {
+        if (id !== undefined) {
+          sendJsonRpc(sessionId, {
+            jsonrpc: "2.0",
+            id,
+            error: { code: -32000, message: "Missing ALPHAVANTAGE_API_KEY on server" },
+          });
+        }
+        return;
+      }
+
+      const fn = normalizeFnName(args.function);
+      if (!isKnownAvFunction(fn)) {
+        if (id !== undefined) {
+          sendJsonRpc(sessionId, {
+            jsonrpc: "2.0",
+            id,
+            error: { code: -32602, message: `Unknown Alpha Vantage function: ${fn}` },
+          });
+        }
+        return;
+      }
+
+      const p = args.params;
+      if (typeof p !== "object" || p === null || Array.isArray(p)) {
+        if (id !== undefined) {
+          sendJsonRpc(sessionId, {
+            jsonrpc: "2.0",
+            id,
+            error: { code: -32602, message: "params must be an object" },
+          });
+        }
+        return;
+      }
+
+      const url = new URL("https://www.alphavantage.co/query");
+      url.searchParams.set("function", fn);
+      url.searchParams.set("apikey", avKey);
+
+      for (const [k, v] of Object.entries(p)) {
+        if (v === undefined || v === null) continue;
+        url.searchParams.set(k, String(v));
+      }
+
+      const resp = await fetch(url);
+      const data = await resp.json();
+
+      if (id !== undefined) {
+        sendJsonRpc(sessionId, {
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] },
+        });
+      }
       return;
     }
 
-    // Build Alpha Vantage REST URL
-    const url = new URL("https://www.alphavantage.co/query");
-    url.searchParams.set("function", fn);
-    url.searchParams.set("apikey", avKey);
-
-    // Pass through all provided parameters
-    for (const [k, v] of Object.entries(q)) {
-      if (v === undefined || v === null) continue;
-      url.searchParams.set(k, String(v));
-    }
-
-    const resp = await fetch(url);
-    const data = await resp.json();
-
-    sendJsonRpc(sessionId, {
-      jsonrpc: "2.0",
-      id,
-      result: { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] },
-    });
-    return;
-  }
-
-
-  sendJsonRpc(sessionId, {
-    jsonrpc: "2.0",
-    id,
-    error: { code: -32601, message: `Unknown tool: ${toolName}` },
-  });
-  return;
-}
-
+    // Unknown tool
     if (id !== undefined) {
       sendJsonRpc(sessionId, {
         jsonrpc: "2.0",
@@ -380,6 +491,7 @@ async function handleJsonRpc(sessionId, msg) {
     return;
   }
 
+  // Unknown method
   if (id !== undefined) {
     sendJsonRpc(sessionId, {
       jsonrpc: "2.0",
@@ -389,11 +501,12 @@ async function handleJsonRpc(sessionId, msg) {
   }
 }
 
-app.get("/health", (req, res) => res.status(200).send("ok"));
-
+// =======================
+// Start server
+// =======================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Server running at http://localhost:${PORT}`);
-  console.log(`   SSE endpoint:      http://localhost:${PORT}/sse`);
-  console.log(`   Messages endpoint: http://localhost:${PORT}/messages`);
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`   SSE endpoint:      /sse`);
+  console.log(`   Messages endpoint: /messages`);
 });
